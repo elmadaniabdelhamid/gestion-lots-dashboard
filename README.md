@@ -84,34 +84,11 @@ CREATE DATABASE gestion_lots;
 
 ## 📊 Fonctionnalités
 
-- ✅ Téléchargement de fichiers ZIP contenant des métadonnées JSON
-- ✅ Extraction et analyse des données JSON depuis l'archive
-- ✅ Stockage des informations de lots et contrôleurs dans PostgreSQL
-- ✅ Tableau de bord avec statistiques :
-  - Total d'images traitées
-  - Images par contrôleur
-  - Statistiques journalières/mensuelles
-  - Taux de rejet et raisons
+
 
 ## 🗄️ Schéma de Base de Données
 
-### Table Controller
-- Stocke les informations uniques des contrôleurs
-- Suit les performances des agents
 
-### Table Lot
-- Informations de traitement par lot
-- Liée aux contrôleurs
-- Contient les dates de traitement, statistiques et résultats des contrôles qualité
-
-## 🔧 Points de Terminaison API
-
-- `GET /api/health` - Vérification de santé
-- `POST /api/upload` - Télécharger un fichier ZIP
-- `POST /api/lots` - Traiter et stocker les données de lots
-- `GET /api/controllers` - Obtenir tous les contrôleurs
-- `GET /api/lots` - Obtenir les lots avec filtres
-- `GET /api/stats` - Obtenir les statistiques du tableau de bord
 
 ## 📝 Structure JSON
 
@@ -128,9 +105,6 @@ L'application attend des fichiers JSON avec la structure suivante :
 }
 ```
 
-## 👥 Équipe
-
-- [Abdelhamid El Madani](https://github.com/elmadaniabdelhamid)
 
 ## 📄 Licence
 
