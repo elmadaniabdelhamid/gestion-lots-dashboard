@@ -27,12 +27,7 @@ app.get('/api/health', (req, res) => {
   res.json({ status: 'OK', message: 'Server is running' });
 });
 
-// TODO: Add routes for:
-// - POST /api/upload - Upload ZIP file
-// - POST /api/lots - Process and store lot data
-// - GET /api/controllers - Get all controllers
-// - GET /api/lots - Get all lots with filters
-// - GET /api/stats - Get dashboard statistics
+// ....Other routes here
 
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
