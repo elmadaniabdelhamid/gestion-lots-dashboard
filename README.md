@@ -42,17 +42,23 @@ gestion-lots-dashboard/
 git clone https://github.com/elmadaniabdelhamid/gestion-lots-dashboard.git
 cd gestion-lots-dashboard
 ```
+### Développement Local (Recommandé)
 
-2. Configurer les variables d'environnement :
+**Backend :**
 ```bash
-cp backend/.env.example backend/.env
-# Modifier backend/.env avec votre configuration
+cd backend
+npm install
+npm run dev
 ```
 
-3. Lancer avec Docker :
+**Frontend :**
 ```bash
-docker-compose up --build
+cd frontend
+npm install
+npm start
 ```
+
+`
 
 L'application sera disponible à :
 - Frontend : http://localhost:3000
