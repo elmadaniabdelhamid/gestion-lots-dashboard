@@ -12,6 +12,8 @@ function App() {
   const [jsonData, setJsonData] = useState([]);
   const [filterTerm, setFilterTerm] = useState('');
   const [showFilterModal, setShowFilterModal] = useState(false);
+  const [currentPage, setCurrentPage] = useState(1);
+  const itemsPerPage = 10;
 
   const initCharts = () => {
     console.log('Initializing ApexCharts...');
@@ -188,6 +190,7 @@ function App() {
     setShowDashboard(false);
     setJsonData([]);
     setUploadStatus('');
+    setCurrentPage(1);
   };
 
   const handleFilterToggle = () => {
@@ -196,6 +199,7 @@ function App() {
 
   const handleFilterChange = (e) => {
     setFilterTerm(e.target.value);
+    setCurrentPage(1); // Reset to first page when filter changes
   };
 
   const handleExport = async (format = 'xlsx') => {
@@ -238,6 +242,33 @@ function App() {
       (item.login_controleur && item.login_controleur.toString().toLowerCase().includes(filterTerm.toLowerCase())) ||
       (item.login_scan && item.login_scan.toString().toLowerCase().includes(filterTerm.toLowerCase()))
     );
+  };
+
+  const getPaginatedData = () => {
+    const filteredData = getFilteredData();
+    const startIndex = (currentPage - 1) * itemsPerPage;
+    const endIndex = startIndex + itemsPerPage;
+    return filteredData.slice(startIndex, endIndex);
+  };
+
+  const getTotalPages = () => {
+    return Math.ceil(getFilteredData().length / itemsPerPage);
+  };
+
+  const handlePageChange = (page) => {
+    setCurrentPage(page);
+  };
+
+  const handlePreviousPage = () => {
+    if (currentPage > 1) {
+      setCurrentPage(currentPage - 1);
+    }
+  };
+
+  const handleNextPage = () => {
+    if (currentPage < getTotalPages()) {
+      setCurrentPage(currentPage + 1);
+    }
   };
 
   // Initialize ApexCharts when dashboard is shown
@@ -505,7 +536,7 @@ function App() {
                       </tr>
                     </thead>
                     <tbody>
-                      {getFilteredData().slice(0, 10).map((item, index) => (
+                      {getPaginatedData().map((item, index) => (
                         <tr key={index}>
                           <td>{item.Num_lot || 'N/A'}</td>
                           <td>{item.arborescence || 'N/A'}</td>
@@ -543,6 +574,49 @@ function App() {
                     </tbody>
                   </table>
                 </div>
+                
+                {/* Pagination Controls */}
+                {getTotalPages() > 1 && (
+                  <div className="pagination-container">
+                    <div className="pagination-info">
+                      <span>
+                        Affichage {((currentPage - 1) * itemsPerPage) + 1} - {Math.min(currentPage * itemsPerPage, getFilteredData().length)} 
+                        {' '}sur {getFilteredData().length} résultats
+                      </span>
+                    </div>
+                    <div className="pagination-controls">
+                      <button 
+                        className="pagination-btn prev-btn" 
+                        onClick={handlePreviousPage}
+                        disabled={currentPage === 1}
+                      >
+                        <i className="fa fa-chevron-left"></i>
+                        Précédent
+                      </button>
+                      
+                      <div className="pagination-numbers">
+                        {Array.from({ length: getTotalPages() }, (_, i) => i + 1).map(page => (
+                          <button
+                            key={page}
+                            className={`pagination-number ${currentPage === page ? 'active' : ''}`}
+                            onClick={() => handlePageChange(page)}
+                          >
+                            {page}
+                          </button>
+                        ))}
+                      </div>
+                      
+                      <button 
+                        className="pagination-btn next-btn" 
+                        onClick={handleNextPage}
+                        disabled={currentPage === getTotalPages()}
+                      >
+                        Suivant
+                        <i className="fa fa-chevron-right"></i>
+                      </button>
+                    </div>
+                  </div>
+                )}
               </div>
 
               {/* Filter Modal */}
