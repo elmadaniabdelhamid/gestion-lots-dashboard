@@ -240,7 +240,8 @@ function App() {
       (item.Num_lot && item.Num_lot.toString().toLowerCase().includes(filterTerm.toLowerCase())) ||
       (item.arborescence && item.arborescence.toLowerCase().includes(filterTerm.toLowerCase())) ||
       (item.login_controleur && item.login_controleur.toString().toLowerCase().includes(filterTerm.toLowerCase())) ||
-      (item.login_scan && item.login_scan.toString().toLowerCase().includes(filterTerm.toLowerCase()))
+      (item.login_scan && item.login_scan.toString().toLowerCase().includes(filterTerm.toLowerCase())) ||
+      (item.source_file && item.source_file.toLowerCase().includes(filterTerm.toLowerCase()))
     );
   };
 
@@ -533,6 +534,7 @@ function App() {
                         <th>Doublons</th>
                         <th>Baseline</th>
                         <th>Tentatives</th>
+                        <th>Fichier Source</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -569,6 +571,7 @@ function App() {
                           <td>{item.doublons || 0}</td>
                           <td>{item.baseline || 0}</td>
                           <td>{item.tentative || 0}</td>
+                          <td>{item.source_file || 'N/A'}</td>
                         </tr>
                       ))}
                     </tbody>

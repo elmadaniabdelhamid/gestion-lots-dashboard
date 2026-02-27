@@ -11,6 +11,7 @@ CREATE TABLE IF NOT EXISTS controle (
     tentative INTEGER DEFAULT 0,
     doublons INTEGER DEFAULT 0,
     baseline INTEGER DEFAULT 0,
+    source_file VARCHAR(500),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
@@ -20,6 +21,7 @@ CREATE INDEX IF NOT EXISTS idx_controle_arborescence ON controle(arborescence);
 CREATE INDEX IF NOT EXISTS idx_controle_controleur ON controle(login_controleur);
 CREATE INDEX IF NOT EXISTS idx_controle_scan ON controle(login_scan);
 CREATE INDEX IF NOT EXISTS idx_controle_dates ON controle(date_debut, date_fin);
+CREATE INDEX IF NOT EXISTS idx_controle_source_file ON controle(source_file);
 
 -- Insert a sample record (optional, for testing)
 -- INSERT INTO controle ("Num_lot", arborescence, login_controleur, login_scan, nb_actes_traites, nb_actes_rejets)

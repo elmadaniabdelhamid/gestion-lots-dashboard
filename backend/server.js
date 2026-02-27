@@ -392,8 +392,8 @@ async function bulkInsertData(data) {
       
       // Build bulk insert query
       const values = validChunk.map((_, index) => {
-        const offset = index * 11;
-        return `($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}, $${offset + 6}, $${offset + 7}, $${offset + 8}, $${offset + 9}, $${offset + 10}, $${offset + 11})`;
+        const offset = index * 12;
+        return `($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}, $${offset + 6}, $${offset + 7}, $${offset + 8}, $${offset + 9}, $${offset + 10}, $${offset + 11}, $${offset + 12})`;
       }).join(',');
       
       const flatValues = validChunk.flatMap(item => [
@@ -407,13 +407,14 @@ async function bulkInsertData(data) {
         item.nb_actes_rejets,
         item.tentative,
         item.doublons,
-        item.baseline
+        item.baseline,
+        item.source_file
       ]);
       
       const query = `
         INSERT INTO controle 
         ("Num_lot", arborescence, login_controleur, login_scan, date_debut, date_fin, 
-         nb_actes_traites, nb_actes_rejets, tentative, doublons, baseline)
+         nb_actes_traites, nb_actes_rejets, tentative, doublons, baseline, source_file)
         VALUES ${values}
         ON CONFLICT ("Num_lot") DO UPDATE SET
           arborescence = EXCLUDED.arborescence,
@@ -425,7 +426,8 @@ async function bulkInsertData(data) {
           nb_actes_rejets = EXCLUDED.nb_actes_rejets,
           tentative = EXCLUDED.tentative,
           doublons = EXCLUDED.doublons,
-          baseline = EXCLUDED.baseline
+          baseline = EXCLUDED.baseline,
+          source_file = EXCLUDED.source_file
       `;
       
       await client.query(query, flatValues);
@@ -443,7 +445,7 @@ async function bulkInsertData(data) {
 }
 
 // Process single file from ZIP (simplified, more reliable)
-async function processZipFile(zip, entry) {
+async function processZipFile(zip, entry, sourceFile = null) {
   try {
     const content = await zip.entryData(entry.name);
     const jsonData = JSON.parse(content.toString('utf8'));
@@ -500,7 +502,8 @@ async function processZipFile(zip, entry) {
         nb_actes_rejets: parseInt(item.nb_actes_rejets) || 0,
         tentative: parseInt(item.tentative) || 0,
         doublons: item.doublons || doublons || 0,
-        baseline: item.baseline || baseline || 0
+        baseline: item.baseline || baseline || 0,
+        source_file: sourceFile
       });
     }
     
@@ -551,6 +554,7 @@ async function handleZipImport(req, res) {
     }
 
     const zipPath = req.file.path;
+    const sourceFile = req.file.originalname;
     console.log(`[ZIP IMPORT] Processing file: ${zipPath} (${(req.file.size / 1024 / 1024).toFixed(2)} MB)`);
 
     let zip;
@@ -584,7 +588,7 @@ async function handleZipImport(req, res) {
       
       // Process batch in parallel
       const batchPromises = batch.map(entry => 
-        processZipFile(zip, entry).catch(err => {
+        processZipFile(zip, entry, sourceFile).catch(err => {
           console.error(`[ZIP IMPORT] ❌ Error processing ${entry.name}:`, err.message);
           return null;
         })
