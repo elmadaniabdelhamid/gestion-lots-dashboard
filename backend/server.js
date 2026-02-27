@@ -349,13 +349,33 @@ async function bulkInsertData(data) {
     for (let i = 0; i < data.length; i += CHUNK_SIZE) {
       const chunk = data.slice(i, i + CHUNK_SIZE);
       
+      // Validate and filter out invalid records
+      const validChunk = chunk.filter(item => {
+        if (!item.Num_lot || item.Num_lot === 'null' || item.Num_lot === 'undefined' || String(item.Num_lot).trim() === '') {
+          console.warn(`[DB INSERT] ❌ Skipping invalid record: missing/invalid Num_lot`, { 
+            Num_lot: item.Num_lot,
+            arborescence: item.arborescence 
+          });
+          errors.push({ record: item, error: 'Missing or invalid Num_lot' });
+          return false;
+        }
+        return true;
+      });
+      
+      if (validChunk.length === 0) {
+        console.log(`[DB INSERT] Chunk ${Math.floor(i / CHUNK_SIZE) + 1} had no valid records, skipping...`);
+        continue;
+      }
+      
+      console.log(`[DB INSERT] Inserting chunk ${Math.floor(i / CHUNK_SIZE) + 1} with ${validChunk.length} records...`);
+      
       // Build bulk insert query
-      const values = chunk.map((_, index) => {
+      const values = validChunk.map((_, index) => {
         const offset = index * 11;
         return `($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}, $${offset + 6}, $${offset + 7}, $${offset + 8}, $${offset + 9}, $${offset + 10}, $${offset + 11})`;
       }).join(',');
       
-      const flatValues = chunk.flatMap(item => [
+      const flatValues = validChunk.flatMap(item => [
         item.Num_lot,
         item.arborescence,
         item.login_controleur,
@@ -388,7 +408,7 @@ async function bulkInsertData(data) {
       `;
       
       await client.query(query, flatValues);
-      successCount += chunk.length;
+      successCount += validChunk.length;
     }
     
     await client.query('COMMIT');
@@ -426,8 +446,24 @@ async function processZipFile(zip, entry) {
         baseline = qualityData.baseline;
       }
       
+      // Extract Num_lot - use filename as fallback if missing
+      let numLot = item.Num_lot || item.num_lot || item.numero_lot;
+      
+      // If still null/undefined, use filename without extension
+      if (!numLot || numLot === 'null' || numLot === 'undefined' || String(numLot).trim() === '') {
+        numLot = path.basename(entry.name, '.json');
+        console.log(`[ZIP IMPORT] Using filename as Num_lot for ${entry.name}: ${numLot}`);
+      }
+      
+      // Final validation - skip if still invalid
+      if (!numLot || String(numLot).trim() === '') {
+        console.warn(`[ZIP IMPORT] ❌ Skipping entry in ${entry.name}: invalid Num_lot`);
+        errors.push({ file: entry.name, error: 'Missing or invalid Num_lot' });
+        continue;
+      }
+      
       results.push({
-        Num_lot: item.Num_lot || item.num_lot || null,
+        Num_lot: String(numLot).trim(),
         arborescence: item.arborescence || arborescence || null,
         login_controleur: item.login_controleur || item.controleur || 'agent de controle',
         login_scan: item.login_scan || item.agent_scan || 'agent de scan',
