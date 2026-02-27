@@ -3,7 +3,7 @@ const cors = require('cors');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
-const AdmZip = require('adm-zip');
+const StreamZip = require('node-stream-zip');
 const { Pool } = require('pg');
 require('dotenv').config();
 
@@ -221,6 +221,7 @@ app.post('/api/import', upload.single('jsonFile'), async (req, res) => {
       }
     }
 
+
     // Clean up uploaded file
     fs.unlinkSync(req.file.path);
 
@@ -331,179 +332,223 @@ app.post('/api/import/json', async (req, res) => {
   }
 });
 
-// Import ZIP file and process all JSON files inside
+// Bulk insert helper function with transaction
+async function bulkInsertData(data) {
+  if (data.length === 0) return { success: 0, errors: [] };
+  
+  const client = await pool.connect();
+  const CHUNK_SIZE = 500; // Insert 500 rows at a time to avoid parameter limit
+  let successCount = 0;
+  const errors = [];
+  
+  try {
+    await client.query('BEGIN');
+    
+    // Process in chunks
+    for (let i = 0; i < data.length; i += CHUNK_SIZE) {
+      const chunk = data.slice(i, i + CHUNK_SIZE);
+      
+      // Build bulk insert query
+      const values = chunk.map((_, index) => {
+        const offset = index * 11;
+        return `($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}, $${offset + 6}, $${offset + 7}, $${offset + 8}, $${offset + 9}, $${offset + 10}, $${offset + 11})`;
+      }).join(',');
+      
+      const flatValues = chunk.flatMap(item => [
+        item.Num_lot,
+        item.arborescence,
+        item.login_controleur,
+        item.login_scan,
+        item.date_debut,
+        item.date_fin,
+        item.nb_actes_traites,
+        item.nb_actes_rejets,
+        item.tentative,
+        item.doublons,
+        item.baseline
+      ]);
+      
+      const query = `
+        INSERT INTO controle 
+        ("Num_lot", arborescence, login_controleur, login_scan, date_debut, date_fin, 
+         nb_actes_traites, nb_actes_rejets, tentative, doublons, baseline)
+        VALUES ${values}
+        ON CONFLICT ("Num_lot") DO UPDATE SET
+          arborescence = EXCLUDED.arborescence,
+          login_controleur = EXCLUDED.login_controleur,
+          login_scan = EXCLUDED.login_scan,
+          date_debut = EXCLUDED.date_debut,
+          date_fin = EXCLUDED.date_fin,
+          nb_actes_traites = EXCLUDED.nb_actes_traites,
+          nb_actes_rejets = EXCLUDED.nb_actes_rejets,
+          tentative = EXCLUDED.tentative,
+          doublons = EXCLUDED.doublons,
+          baseline = EXCLUDED.baseline
+      `;
+      
+      await client.query(query, flatValues);
+      successCount += chunk.length;
+    }
+    
+    await client.query('COMMIT');
+    return { success: successCount, errors };
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+// Process file from ZIP (async)
+async function processZipFile(zip, entry) {
+  try {
+    const content = await zip.entryData(entry.name);
+    const jsonData = JSON.parse(content.toString('utf8'));
+    
+    // Handle single object or array of objects
+    const dataArray = Array.isArray(jsonData) ? jsonData : [jsonData];
+    const results = [];
+    
+    for (const item of dataArray) {
+      // Extract arborescence from file path
+      const pathParts = entry.name.split('/');
+      pathParts.pop(); // Remove filename
+      const arborescence = pathParts.join('/');
+      
+      // Parse quality data if present
+      let doublons = 0;
+      let baseline = 0;
+      if (item.qualite_acte) {
+        const qualityData = parseQualiteActe(item.qualite_acte);
+        doublons = qualityData.doublons;
+        baseline = qualityData.baseline;
+      }
+      
+      results.push({
+        Num_lot: item.Num_lot || item.num_lot || null,
+        arborescence: item.arborescence || arborescence || null,
+        login_controleur: item.login_controleur || item.controleur || null,
+        login_scan: item.login_scan || item.agent_scan || '0',
+        date_debut: item.date_debut ? new Date(item.date_debut) : null,
+        date_fin: item.date_fin ? new Date(item.date_fin) : null,
+        nb_actes_traites: parseInt(item.nb_actes_traites) || 0,
+        nb_actes_rejets: parseInt(item.nb_actes_rejets) || 0,
+        tentative: parseInt(item.tentative) || 0,
+        doublons: item.doublons || doublons || 0,
+        baseline: item.baseline || baseline || 0
+      });
+    }
+    
+    return results;
+  } catch (error) {
+    throw new Error(`Failed to process ${entry.name}: ${error.message}`);
+  }
+}
+
+// Import ZIP file with optimized parallel processing
 app.post('/api/import/zip', upload.single('zipFile'), async (req, res) => {
+  const startTime = Date.now();
+  
   try {
     if (!req.file) {
       return res.status(400).json({ error: 'No ZIP file uploaded' });
     }
 
-    const zip = new AdmZip(req.file.path);
-    const entries = zip.getEntries();
+    const zipPath = req.file.path;
+    console.log(`[ZIP IMPORT] Processing file: ${zipPath} (${(req.file.size / 1024 / 1024).toFixed(2)} MB)`);
+
+    const zip = new StreamZip.async({ file: zipPath });
+    const entries = await zip.entries();
     
-    let totalFiles = 0;
-    let processedFiles = 0;
-    let errorFiles = 0;
+    // Filter JSON files
+    const jsonFiles = Object.values(entries).filter(
+      entry => !entry.isDirectory && entry.name.toLowerCase().endsWith('.json')
+    );
+
+    console.log(`[ZIP IMPORT] Found ${jsonFiles.length} JSON files to process`);
+
+    const allData = [];
     const errors = [];
-    const processedData = [];
-
-    // Create temp directory for extraction
-    const tempDir = path.join(__dirname, 'temp', Date.now().toString());
-    if (!fs.existsSync(path.join(__dirname, 'temp'))) {
-      fs.mkdirSync(path.join(__dirname, 'temp'));
+    
+    // Process in parallel batches
+    const BATCH_SIZE = 10; // Process 10 files simultaneously
+    const batches = [];
+    
+    for (let i = 0; i < jsonFiles.length; i += BATCH_SIZE) {
+      batches.push(jsonFiles.slice(i, i + BATCH_SIZE));
     }
-    fs.mkdirSync(tempDir);
 
-    try {
-      // Extract all files
-      zip.extractAllTo(tempDir, true);
+    console.log(`[ZIP IMPORT] Processing in ${batches.length} batches of ${BATCH_SIZE} files`);
 
-      // Find all JSON files recursively
-      const findJsonFiles = (dir, basePath = '') => {
-        const files = [];
-        const items = fs.readdirSync(dir);
-        
-        for (const item of items) {
-          const fullPath = path.join(dir, item);
-          const relativePath = basePath ? path.join(basePath, item) : item;
-          const stat = fs.statSync(fullPath);
-          
-          if (stat.isDirectory()) {
-            files.push(...findJsonFiles(fullPath, relativePath));
-          } else if (item.toLowerCase().endsWith('.json')) {
-            files.push({
-              path: fullPath,
-              relativePath: relativePath.replace(/\\/g, '/'),
-              arborescence: basePath ? basePath.replace(/\\/g, '/') : ''
-            });
-          }
-        }
-        return files;
-      };
-
-      const jsonFiles = findJsonFiles(tempDir);
-      totalFiles = jsonFiles.length;
-
-      // Process each JSON file
-      for (const file of jsonFiles) {
-        try {
-          const content = fs.readFileSync(file.path, 'utf8');
-          const jsonData = JSON.parse(content);
-          
-          // Handle single object or array of objects
-          const data = Array.isArray(jsonData) ? jsonData : [jsonData];
-          
-          for (const item of data) {
-            // Add arborescence from file path if not present
-            if (!item.arborescence && file.arborescence) {
-              item.arborescence = file.arborescence;
-            }
-            
-            // Parse quality data if present
-            if (item.qualite_acte) {
-              const { doublons, baseline } = parseQualiteActe(item.qualite_acte);
-              item.doublons = doublons;
-              item.baseline = baseline;
-            }
-            
-            processedData.push(item);
-          }
-          
-          processedFiles++;
-        } catch (error) {
-          errorFiles++;
+    // Process each batch in parallel
+    for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
+      const batch = batches[batchIndex];
+      
+      const batchPromises = batch.map(entry => processZipFile(zip, entry));
+      const results = await Promise.allSettled(batchPromises);
+      
+      results.forEach((result, index) => {
+        if (result.status === 'fulfilled') {
+          allData.push(...result.value);
+        } else {
           errors.push({
-            file: file.relativePath,
-            error: error.message
+            file: batch[index].name,
+            error: result.reason.message
           });
-        }
-      }
-
-      // Import all processed data to database
-      let successCount = 0;
-      let errorCount = 0;
-      const importErrors = [];
-
-      for (const item of processedData) {
-        try {
-          const query = `
-            INSERT INTO controle (
-              "Num_lot", arborescence, login_controleur, login_scan, 
-              date_debut, date_fin, nb_actes_traites, nb_actes_rejets, 
-              tentative, doublons, baseline
-            ) VALUES (
-              $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11
-            ) ON CONFLICT ("Num_lot") DO UPDATE SET
-              arborescence = EXCLUDED.arborescence,
-              login_controleur = EXCLUDED.login_controleur,
-              login_scan = EXCLUDED.login_scan,
-              date_debut = EXCLUDED.date_debut,
-              date_fin = EXCLUDED.date_fin,
-              nb_actes_traites = EXCLUDED.nb_actes_traites,
-              nb_actes_rejets = EXCLUDED.nb_actes_rejets,
-              tentative = EXCLUDED.tentative,
-              doublons = EXCLUDED.doublons,
-              baseline = EXCLUDED.baseline
-          `;
-
-          await pool.query(query, [
-            item.Num_lot || item.num_lot,
-            item.arborescence || null,
-            item.login_controleur || item.controleur || null,
-            item.login_scan || item.agent_scan || '0',
-            item.date_debut ? new Date(item.date_debut) : null,
-            item.date_fin ? new Date(item.date_fin) : null,
-            item.nb_actes_traites || 0,
-            item.nb_actes_rejets || 0,
-            item.tentative || 0,
-            item.doublons || 0,
-            item.baseline || 0
-          ]);
-
-          successCount++;
-        } catch (error) {
-          errorCount++;
-          importErrors.push({
-            Num_lot: item.Num_lot || item.num_lot,
-            error: error.message
-          });
-        }
-      }
-
-      // Clean up
-      fs.rmSync(tempDir, { recursive: true, force: true });
-      fs.unlinkSync(req.file.path);
-
-      res.json({
-        message: 'ZIP import completed',
-        zip_info: {
-          total_json_files: totalFiles,
-          processed_files: processedFiles,
-          error_files: errorFiles,
-          file_errors: errors
-        },
-        import_info: {
-          total_records: processedData.length,
-          success_count: successCount,
-          error_count: errorCount,
-          import_errors: importErrors
         }
       });
-
-    } catch (error) {
-      // Clean up on error
-      if (fs.existsSync(tempDir)) {
-        fs.rmSync(tempDir, { recursive: true, force: true });
+      
+      // Log progress every 10 batches
+      if ((batchIndex + 1) % 10 === 0 || batchIndex === batches.length - 1) {
+        const processed = Math.min((batchIndex + 1) * BATCH_SIZE, jsonFiles.length);
+        console.log(`[ZIP IMPORT] Processed ${processed}/${jsonFiles.length} files (${Math.round(processed / jsonFiles.length * 100)}%)`);
       }
-      if (req.file && fs.existsSync(req.file.path)) {
-        fs.unlinkSync(req.file.path);
-      }
-      throw error;
     }
 
+    await zip.close();
+    
+    console.log(`[ZIP IMPORT] Extraction complete. Inserting ${allData.length} records into database...`);
+
+    // Bulk insert into database
+    let importResult = { success: 0, errors: [] };
+    if (allData.length > 0) {
+      importResult = await bulkInsertData(allData);
+    }
+
+    // Cleanup
+    fs.unlinkSync(zipPath);
+    
+    const totalTime = ((Date.now() - startTime) / 1000).toFixed(2);
+    console.log(`[ZIP IMPORT] Completed in ${totalTime}s. Success: ${importResult.success}, Errors: ${errors.length}`);
+
+    res.json({
+      success: true,
+      message: 'ZIP import completed',
+      processing_time_seconds: parseFloat(totalTime),
+      zip_info: {
+        total_json_files: jsonFiles.length,
+        processed_files: jsonFiles.length - errors.length,
+        error_files: errors.length,
+        file_errors: errors.length > 0 ? errors.slice(0, 10) : [] // Return first 10 errors
+      },
+      import_info: {
+        total_records: allData.length,
+        success_count: importResult.success,
+        error_count: importResult.errors.length
+      }
+    });
+
   } catch (error) {
-    console.error('Error importing ZIP:', error);
+    console.error('[ZIP IMPORT] Error:', error);
+    
+    // Cleanup on error
+    if (req.file && fs.existsSync(req.file.path)) {
+      fs.unlinkSync(req.file.path);
+    }
+    
     res.status(500).json({ 
+      success: false,
       error: 'Failed to import ZIP file',
       details: error.message 
     });
