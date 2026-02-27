@@ -58,13 +58,33 @@ app.use(express.json());
 // Configure multer for file upload
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
+    // Ensure uploads directory exists
+    if (!fs.existsSync('uploads')) {
+      fs.mkdirSync('uploads', { recursive: true });
+    }
     cb(null, 'uploads/');
   },
   filename: (req, file, cb) => {
     cb(null, Date.now() + '-' + file.originalname);
   }
 });
-const upload = multer({ storage });
+
+const upload = multer({ 
+  storage,
+  limits: {
+    fileSize: 500 * 1024 * 1024 // 500 MB max file size
+  },
+  fileFilter: (req, file, cb) => {
+    // Only accept ZIP files
+    if (file.mimetype === 'application/zip' || 
+        file.mimetype === 'application/x-zip-compressed' ||
+        file.originalname.toLowerCase().endsWith('.zip')) {
+      cb(null, true);
+    } else {
+      cb(new Error('Only ZIP files are allowed'), false);
+    }
+  }
+});
 
 // Routes
 app.get('/api/health', (req, res) => {
@@ -351,12 +371,13 @@ async function bulkInsertData(data) {
       
       // Validate and filter out invalid records
       const validChunk = chunk.filter(item => {
-        if (!item.Num_lot || item.Num_lot === 'null' || item.Num_lot === 'undefined' || String(item.Num_lot).trim() === '') {
-          console.warn(`[DB INSERT] ❌ Skipping invalid record: missing/invalid Num_lot`, { 
+        const numLotInt = parseInt(item.Num_lot);
+        if (isNaN(numLotInt) || numLotInt === null || numLotInt === undefined) {
+          console.warn(`[DB INSERT] ❌ Skipping invalid record: invalid Num_lot (not an integer)`, { 
             Num_lot: item.Num_lot,
             arborescence: item.arborescence 
           });
-          errors.push({ record: item, error: 'Missing or invalid Num_lot' });
+          errors.push({ record: item, error: 'Num_lot must be a valid integer' });
           return false;
         }
         return true;
@@ -449,21 +470,27 @@ async function processZipFile(zip, entry) {
       // Extract Num_lot - use filename as fallback if missing
       let numLot = item.Num_lot || item.num_lot || item.numero_lot;
       
-      // If still null/undefined, use filename without extension
-      if (!numLot || numLot === 'null' || numLot === 'undefined' || String(numLot).trim() === '') {
-        numLot = path.basename(entry.name, '.json');
-        console.log(`[ZIP IMPORT] Using filename as Num_lot for ${entry.name}: ${numLot}`);
+      // If still null/undefined, try to extract from filename
+      if (!numLot || numLot === 'null' || numLot === 'undefined') {
+        const filename = path.basename(entry.name, '.json');
+        // Try to parse filename as number
+        numLot = parseInt(filename) || null;
+        if (numLot) {
+          console.log(`[ZIP IMPORT] Using filename as Num_lot for ${entry.name}: ${numLot}`);
+        }
       }
       
-      // Final validation - skip if still invalid
-      if (!numLot || String(numLot).trim() === '') {
-        console.warn(`[ZIP IMPORT] ❌ Skipping entry in ${entry.name}: invalid Num_lot`);
-        errors.push({ file: entry.name, error: 'Missing or invalid Num_lot' });
+      // Parse as integer
+      const numLotInt = parseInt(numLot);
+      
+      // Final validation - must be a valid integer (allow 0)
+      if (isNaN(numLotInt) || numLotInt === null || numLotInt === undefined) {
+        console.warn(`[ZIP IMPORT] ❌ Skipping entry in ${entry.name}: invalid Num_lot (not a number): ${numLot}`);
         continue;
       }
       
       results.push({
-        Num_lot: String(numLot).trim(),
+        Num_lot: numLotInt,
         arborescence: item.arborescence || arborescence || null,
         login_controleur: item.login_controleur || item.controleur || 'agent de controle',
         login_scan: item.login_scan || item.agent_scan || 'agent de scan',
@@ -479,13 +506,43 @@ async function processZipFile(zip, entry) {
     
     return results;
   } catch (error) {
-    console.error(`Error processing ${entry.name}:`, error.message);
+    console.error(`[ZIP IMPORT] ❌ Error processing ${entry.name}:`, {
+      error: error.message,
+      stack: error.stack?.split('\n')[0]
+    });
     return null;
   }
 }
 
 // Import ZIP file with optimized processing (simplified for reliability)
-app.post('/api/import/zip', upload.single('zipFile'), async (req, res) => {
+app.post('/api/import/zip', (req, res) => {
+  upload.single('zipFile')(req, res, async (err) => {
+    // Handle multer errors
+    if (err) {
+      console.error('[ZIP IMPORT] ❌ Upload error:', err.message);
+      
+      if (err.code === 'LIMIT_FILE_SIZE') {
+        return res.status(400).json({
+          success: false,
+          error: 'File too large',
+          details: 'Maximum file size is 500 MB'
+        });
+      }
+      
+      return res.status(400).json({
+        success: false,
+        error: 'Upload failed',
+        details: err.message
+      });
+    }
+    
+    // Continue with ZIP processing
+    await handleZipImport(req, res);
+  });
+});
+
+// Separated ZIP import handler for cleaner error handling
+async function handleZipImport(req, res) {
   const startTime = Date.now();
   
   try {
@@ -496,8 +553,18 @@ app.post('/api/import/zip', upload.single('zipFile'), async (req, res) => {
     const zipPath = req.file.path;
     console.log(`[ZIP IMPORT] Processing file: ${zipPath} (${(req.file.size / 1024 / 1024).toFixed(2)} MB)`);
 
-    const zip = new StreamZip.async({ file: zipPath });
-    const entries = await zip.entries();
+    let zip;
+    let entries;
+    
+    try {
+      zip = new StreamZip.async({ file: zipPath });
+      console.log(`[ZIP IMPORT] ZIP file opened successfully`);
+      entries = await zip.entries();
+      console.log(`[ZIP IMPORT] ZIP entries read: ${Object.keys(entries).length} total entries`);
+    } catch (zipError) {
+      console.error(`[ZIP IMPORT] ❌ Failed to open/read ZIP file:`, zipError.message);
+      throw new Error(`ZIP extraction failed: ${zipError.message}. The file may be corrupted or not a valid ZIP archive.`);
+    }
     
     // Filter JSON files
     const jsonFiles = Object.values(entries).filter(
@@ -516,7 +583,12 @@ app.post('/api/import/zip', upload.single('zipFile'), async (req, res) => {
       const batch = jsonFiles.slice(i, i + BATCH_SIZE);
       
       // Process batch in parallel
-      const batchPromises = batch.map(entry => processZipFile(zip, entry));
+      const batchPromises = batch.map(entry => 
+        processZipFile(zip, entry).catch(err => {
+          console.error(`[ZIP IMPORT] ❌ Error processing ${entry.name}:`, err.message);
+          return null;
+        })
+      );
       const results = await Promise.all(batchPromises);
       
       // Collect results
@@ -572,20 +644,30 @@ app.post('/api/import/zip', upload.single('zipFile'), async (req, res) => {
     });
 
   } catch (error) {
-    console.error('[ZIP IMPORT] Error:', error);
+    console.error('[ZIP IMPORT] ❌ FATAL ERROR:', {
+      message: error.message,
+      stack: error.stack,
+      file: req.file?.originalname,
+      size: req.file?.size
+    });
     
     // Cleanup on error
     if (req.file && fs.existsSync(req.file.path)) {
-      fs.unlinkSync(req.file.path);
+      try {
+        fs.unlinkSync(req.file.path);
+      } catch (cleanupError) {
+        console.error('[ZIP IMPORT] Failed to cleanup file:', cleanupError.message);
+      }
     }
     
     res.status(500).json({ 
       success: false,
       error: 'Failed to import ZIP file',
-      details: error.message 
+      details: error.message,
+      suggestion: 'Check if the file is a valid ZIP archive and not corrupted. Try re-uploading the file.'
     });
   }
-});
+}
 
 // Get all files (no path)
 app.get('/api/files', async (req, res) => {

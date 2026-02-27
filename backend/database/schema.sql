@@ -1,6 +1,6 @@
 -- Create the controle table for managing lots
 CREATE TABLE IF NOT EXISTS controle (
-    "Num_lot" VARCHAR(255) PRIMARY KEY,
+    "Num_lot" BIGINT PRIMARY KEY,
     arborescence TEXT,
     login_controleur VARCHAR(255) DEFAULT 'agent de controle',
     login_scan VARCHAR(255) DEFAULT 'agent de scan',
