@@ -198,6 +198,37 @@ function App() {
     setFilterTerm(e.target.value);
   };
 
+  const handleExport = async (format = 'xlsx') => {
+    try {
+      setIsLoading(true);
+      
+      const response = await fetch(`http://localhost:5000/api/export/report?format=${format}`);
+      
+      if (response.ok) {
+        const blob = await response.blob();
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        const extension = format === 'xlsx' || format === 'excel' ? 'xlsx' : (format === 'csv' ? 'csv' : 'json');
+        a.download = `rapport-gestion-lots-${Date.now()}.${extension}`;
+        document.body.appendChild(a);
+        a.click();
+        window.URL.revokeObjectURL(url);
+        document.body.removeChild(a);
+        
+        setUploadStatus('Rapport exporté avec succès!');
+        setTimeout(() => setUploadStatus(''), 3000);
+      } else {
+        setUploadStatus('Erreur lors de l\'export du rapport');
+      }
+    } catch (error) {
+      console.error('Error exporting report:', error);
+      setUploadStatus('Erreur de connexion au serveur');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
   const getFilteredData = () => {
     if (!filterTerm) return jsonData;
     
@@ -451,7 +482,7 @@ function App() {
                     <button className="table-action-btn active" onClick={handleFilterToggle}>
                       <i className="fa fa-filter"></i>
                     </button>
-                    <button className="table-action-btn">
+                    <button className="table-action-btn" onClick={() => handleExport('xlsx')} title="Exporter le rapport en Excel">
                       <i className="fa fa-download"></i>
                     </button>
                   </div>

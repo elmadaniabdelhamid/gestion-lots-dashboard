@@ -5,6 +5,7 @@ const path = require('path');
 const fs = require('fs');
 const StreamZip = require('node-stream-zip');
 const { Pool } = require('pg');
+const ExcelJS = require('exceljs');
 require('dotenv').config();
 
 const app = express();
@@ -200,8 +201,8 @@ app.post('/api/import', upload.single('jsonFile'), async (req, res) => {
         await pool.query(query, [
           item.Num_lot,
           item.arborescence || null,
-          item.login_controleur || null,
-          item.login_scan || '0',
+          item.login_controleur || 'agent de controle',
+          item.login_scan || 'agent de scan',
           item.date_debut ? new Date(item.date_debut) : null,
           item.date_fin ? new Date(item.date_fin) : null,
           item.nb_actes_traites || 0,
@@ -294,8 +295,8 @@ app.post('/api/import/json', async (req, res) => {
         await pool.query(query, [
           item.Num_lot,
           item.arborescence || null,
-          item.login_controleur || null,
-          item.login_scan || '0',
+          item.login_controleur || 'agent de controle',
+          item.login_scan || 'agent de scan',
           item.date_debut ? new Date(item.date_debut) : null,
           item.date_fin ? new Date(item.date_fin) : null,
           item.nb_actes_traites || 0,
@@ -400,7 +401,7 @@ async function bulkInsertData(data) {
   }
 }
 
-// Process file from ZIP (async)
+// Process single file from ZIP (simplified, more reliable)
 async function processZipFile(zip, entry) {
   try {
     const content = await zip.entryData(entry.name);
@@ -428,8 +429,8 @@ async function processZipFile(zip, entry) {
       results.push({
         Num_lot: item.Num_lot || item.num_lot || null,
         arborescence: item.arborescence || arborescence || null,
-        login_controleur: item.login_controleur || item.controleur || null,
-        login_scan: item.login_scan || item.agent_scan || '0',
+        login_controleur: item.login_controleur || item.controleur || 'agent de controle',
+        login_scan: item.login_scan || item.agent_scan || 'agent de scan',
         date_debut: item.date_debut ? new Date(item.date_debut) : null,
         date_fin: item.date_fin ? new Date(item.date_fin) : null,
         nb_actes_traites: parseInt(item.nb_actes_traites) || 0,
@@ -442,11 +443,12 @@ async function processZipFile(zip, entry) {
     
     return results;
   } catch (error) {
-    throw new Error(`Failed to process ${entry.name}: ${error.message}`);
+    console.error(`Error processing ${entry.name}:`, error.message);
+    return null;
   }
 }
 
-// Import ZIP file with optimized parallel processing
+// Import ZIP file with optimized processing (simplified for reliability)
 app.post('/api/import/zip', upload.single('zipFile'), async (req, res) => {
   const startTime = Date.now();
   
@@ -471,37 +473,31 @@ app.post('/api/import/zip', upload.single('zipFile'), async (req, res) => {
     const allData = [];
     const errors = [];
     
-    // Process in parallel batches
-    const BATCH_SIZE = 10; // Process 10 files simultaneously
-    const batches = [];
+    // Process in parallel batches (10 files at a time)
+    const BATCH_SIZE = 10;
     
     for (let i = 0; i < jsonFiles.length; i += BATCH_SIZE) {
-      batches.push(jsonFiles.slice(i, i + BATCH_SIZE));
-    }
-
-    console.log(`[ZIP IMPORT] Processing in ${batches.length} batches of ${BATCH_SIZE} files`);
-
-    // Process each batch in parallel
-    for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
-      const batch = batches[batchIndex];
+      const batch = jsonFiles.slice(i, i + BATCH_SIZE);
       
+      // Process batch in parallel
       const batchPromises = batch.map(entry => processZipFile(zip, entry));
-      const results = await Promise.allSettled(batchPromises);
+      const results = await Promise.all(batchPromises);
       
+      // Collect results
       results.forEach((result, index) => {
-        if (result.status === 'fulfilled') {
-          allData.push(...result.value);
-        } else {
+        if (result && result.length > 0) {
+          allData.push(...result);
+        } else if (result === null) {
           errors.push({
             file: batch[index].name,
-            error: result.reason.message
+            error: 'Failed to process file'
           });
         }
       });
       
-      // Log progress every 10 batches
-      if ((batchIndex + 1) % 10 === 0 || batchIndex === batches.length - 1) {
-        const processed = Math.min((batchIndex + 1) * BATCH_SIZE, jsonFiles.length);
+      // Log progress every 50 files
+      if ((i + BATCH_SIZE) % 50 === 0 || i + BATCH_SIZE >= jsonFiles.length) {
+        const processed = Math.min(i + BATCH_SIZE, jsonFiles.length);
         console.log(`[ZIP IMPORT] Processed ${processed}/${jsonFiles.length} files (${Math.round(processed / jsonFiles.length * 100)}%)`);
       }
     }
@@ -530,7 +526,7 @@ app.post('/api/import/zip', upload.single('zipFile'), async (req, res) => {
         total_json_files: jsonFiles.length,
         processed_files: jsonFiles.length - errors.length,
         error_files: errors.length,
-        file_errors: errors.length > 0 ? errors.slice(0, 10) : [] // Return first 10 errors
+        file_errors: errors.length > 0 ? errors.slice(0, 10) : []
       },
       import_info: {
         total_records: allData.length,
@@ -702,6 +698,317 @@ app.get('/api/browse', async (req, res) => {
   } catch (error) {
     console.error('Error browsing arborescence:', error);
     res.status(500).json({ error: 'Failed to browse arborescence' });
+  }
+});
+
+// Export comprehensive report
+app.get('/api/export/report', async (req, res) => {
+  try {
+    const { format = 'csv' } = req.query;
+    
+    // Get comprehensive data
+    const [
+      generalStats,
+      controleurStats,
+      dailyPerformance
+    ] = await Promise.all([
+      pool.query(`
+        SELECT 
+          COUNT(*) as total_lots,
+          SUM(nb_actes_traites) as total_actes_traites,
+          SUM(nb_actes_rejets) as total_actes_rejets,
+          MIN(date_debut) as date_premiere,
+          MAX(date_fin) as date_derniere
+        FROM controle
+      `),
+      pool.query(`
+        SELECT 
+          COALESCE(login_controleur, 'Non spécifié') as controleur,
+          SUM(nb_actes_traites) as total_actes_controlees,
+          SUM(nb_actes_rejets) as total_erreurs,
+          ROUND(CAST(
+            CASE 
+              WHEN SUM(nb_actes_traites) > 0 
+              THEN (SUM(nb_actes_rejets)::float / SUM(nb_actes_traites) * 100) 
+              ELSE 0 
+            END AS numeric
+          ), 3) as taux_erreur
+        FROM controle 
+        GROUP BY login_controleur
+        ORDER BY controleur
+      `),
+      pool.query(`
+        SELECT 
+          COALESCE(login_controleur, 'Non spécifié') as controleur,
+          DATE(date_debut) as date_lot,
+          SUM(nb_actes_traites) as total_actes
+        FROM controle 
+        WHERE date_debut IS NOT NULL
+        GROUP BY login_controleur, DATE(date_debut)
+        ORDER BY DATE(date_debut), login_controleur
+      `)
+    ]);
+
+    const gs = generalStats.rows[0];
+    const timestamp = new Date().toLocaleString('fr-FR');
+    const filename = `rapport-gestion-lots-${Date.now()}`;
+
+    if (format === 'csv') {
+      // Generate CSV (legacy)
+      const lines = [];
+      lines.push('Chef d\'équipe,' + sortedDates.join(','));
+      const dailyTotals = new Map();
+      sortedDates.forEach(date => dailyTotals.set(date, 0));
+      sortedControllers.forEach(controller => {
+        const row = [controller];
+        sortedDates.forEach(date => {
+          const value = controllerMap.get(controller).get(date) || 0;
+          row.push(value);
+          dailyTotals.set(date, dailyTotals.get(date) + value);
+        });
+        lines.push(row.join(','));
+      });
+      const totalRow = ['Total général'];
+      sortedDates.forEach(date => totalRow.push(dailyTotals.get(date)));
+      lines.push(totalRow.join(','));
+      lines.push('');
+      lines.push('');
+      lines.push('Chef d\'équipe,Nbr d\'image contrôlé,Nbr d\'erreur détecté,Taux d\'erreur,Objectif');
+      controleurStats.rows.forEach(c => {
+        lines.push(`${c.controleur},${c.total_actes_controlees},${c.total_erreurs},${c.taux_erreur}%,1%`);
+      });
+      lines.push('');
+      lines.push('--- FIN DU RAPPORT ---');
+      res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+      res.setHeader('Content-Disposition', `attachment; filename="${filename}.csv"`);
+      res.send('\uFEFF' + lines.join('\n'));
+    } else if (format === 'excel' || format === 'xlsx') {
+      // Generate styled Excel file
+      const workbook = new ExcelJS.Workbook();
+      const worksheet = workbook.addWorksheet('Rapport Performance');
+
+      // Build daily performance matrix
+      const dateMap = new Map();
+      const controllerMap = new Map();
+      
+      dailyPerformance.rows.forEach(row => {
+        const dateStr = new Date(row.date_lot).toLocaleDateString('fr-FR');
+        const controller = row.controleur;
+        const actes = parseInt(row.total_actes) || 0;
+        
+        if (!dateMap.has(dateStr)) {
+          dateMap.set(dateStr, new Date(row.date_lot));
+        }
+        
+        if (!controllerMap.has(controller)) {
+          controllerMap.set(controller, new Map());
+        }
+        
+        controllerMap.get(controller).set(dateStr, actes);
+      });
+      
+      const sortedDates = Array.from(dateMap.entries())
+        .sort((a, b) => a[1] - b[1])
+        .map(entry => entry[0]);
+      
+      const sortedControllers = Array.from(controllerMap.keys()).sort();
+
+      // TABLE 1: Daily Performance
+      const headerRow1 = ['Agent de controle$', ...sortedDates];
+      const table1StartRow = 1;
+      const table1HeaderRow = worksheet.addRow(headerRow1);
+      
+      // Style header row 1
+      table1HeaderRow.font = { bold: true, color: { argb: 'FFFFFFFF' } };
+      table1HeaderRow.fill = {
+        type: 'pattern',
+        pattern: 'solid',
+        fgColor: { argb: 'FF000000' }
+      };
+      table1HeaderRow.alignment = { vertical: 'middle', horizontal: 'center' };
+      table1HeaderRow.eachCell(cell => {
+        cell.border = {
+          top: { style: 'thin' },
+          left: { style: 'thin' },
+          bottom: { style: 'thin' },
+          right: { style: 'thin' }
+        };
+      });
+
+      // Add controller data rows
+      const dailyTotals = new Map();
+      sortedDates.forEach(date => dailyTotals.set(date, 0));
+      
+      sortedControllers.forEach(controller => {
+        const rowData = [controller];
+        sortedDates.forEach(date => {
+          const value = controllerMap.get(controller).get(date) || 0;
+          rowData.push(value);
+          dailyTotals.set(date, dailyTotals.get(date) + value);
+        });
+        const dataRow = worksheet.addRow(rowData);
+        dataRow.eachCell((cell, colNumber) => {
+          if (colNumber === 1) {
+            cell.alignment = { vertical: 'middle', horizontal: 'left' };
+          } else {
+            cell.alignment = { vertical: 'middle', horizontal: 'center' };
+          }
+          cell.border = {
+            top: { style: 'thin' },
+            left: { style: 'thin' },
+            bottom: { style: 'thin' },
+            right: { style: 'thin' }
+          };
+        });
+      });
+
+      // Add Total général row
+      const totalRowData = ['Total général'];
+      sortedDates.forEach(date => totalRowData.push(dailyTotals.get(date)));
+      const totalRow = worksheet.addRow(totalRowData);
+      totalRow.font = { bold: true };
+      totalRow.eachCell((cell, colNumber) => {
+        if (colNumber === 1) {
+          cell.alignment = { vertical: 'middle', horizontal: 'left' };
+        } else {
+          cell.alignment = { vertical: 'middle', horizontal: 'center' };
+        }
+        cell.border = {
+          top: { style: 'medium' },
+          left: { style: 'thin' },
+          bottom: { style: 'medium' },
+          right: { style: 'thin' }
+        };
+      });
+
+      // Add spacing
+      worksheet.addRow([]);
+      worksheet.addRow([]);
+
+      // TABLE 2: Quality Metrics
+      const table2HeaderRow = worksheet.addRow([
+        'Agent de controle$',
+        'Nbr d\'image contrôlé',
+        'Nbr d\'erreur détecté',
+        'Taux d\'erreur',
+        'Objectif'
+      ]);
+      
+      // Style header row 2
+      table2HeaderRow.font = { bold: true, color: { argb: 'FFFFFFFF' } };
+      table2HeaderRow.fill = {
+        type: 'pattern',
+        pattern: 'solid',
+        fgColor: { argb: 'FF000000' }
+      };
+      table2HeaderRow.alignment = { vertical: 'middle', horizontal: 'center' };
+      table2HeaderRow.eachCell(cell => {
+        cell.border = {
+          top: { style: 'thin' },
+          left: { style: 'thin' },
+          bottom: { style: 'thin' },
+          right: { style: 'thin' }
+        };
+      });
+
+      // Add quality data rows
+      controleurStats.rows.forEach(c => {
+        const qualityRow = worksheet.addRow([
+          c.controleur,
+          c.total_actes_controlees,
+          c.total_erreurs,
+          `${c.taux_erreur}%`,
+          '1%'
+        ]);
+        
+        qualityRow.eachCell((cell, colNumber) => {
+          if (colNumber === 1) {
+            cell.alignment = { vertical: 'middle', horizontal: 'left' };
+          } else {
+            cell.alignment = { vertical: 'middle', horizontal: 'center' };
+          }
+          cell.border = {
+            top: { style: 'thin' },
+            left: { style: 'thin' },
+            bottom: { style: 'thin' },
+            right: { style: 'thin' }
+          };
+          
+          // Highlight error rate if above objective
+          if (colNumber === 4 && parseFloat(c.taux_erreur) > 1.0) {
+            cell.fill = {
+              type: 'pattern',
+              pattern: 'solid',
+              fgColor: { argb: 'FFFF6B6B' }
+            };
+            cell.font = { bold: true };
+          } else if (colNumber === 4) {
+            cell.fill = {
+              type: 'pattern',
+              pattern: 'solid',
+              fgColor: { argb: 'FF90EE90' }
+            };
+          }
+        });
+      });
+
+      // Add footer
+      worksheet.addRow([]);
+      const footerRow = worksheet.addRow(['--- FIN DU RAPPORT ---']);
+      footerRow.font = { italic: true };
+
+      // Auto-fit columns
+      worksheet.columns.forEach((column, idx) => {
+        if (idx === 0) {
+          column.width = 25;
+        } else {
+          column.width = 15;
+        }
+      });
+
+      // Enable autofilter on both table headers
+      worksheet.autoFilter = {
+        from: { row: 1, column: 1 },
+        to: { row: 1, column: headerRow1.length }
+      };
+
+      // Send Excel file
+      res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+      res.setHeader('Content-Disposition', `attachment; filename="${filename}.xlsx"`);
+      
+      await workbook.xlsx.write(res);
+      res.end();
+    } else {
+      // JSON format
+      const report = {
+        metadata: {
+          date_generation: timestamp,
+          type_rapport: 'Rapport de Performance Quotidienne',
+          periode: {
+            debut: gs.date_premiere,
+            fin: gs.date_derniere
+          }
+        },
+        statistiques_generales: {
+          total_lots: parseInt(gs.total_lots),
+          total_actes_traites: parseInt(gs.total_actes_traites || 0),
+          total_actes_rejets: parseInt(gs.total_actes_rejets || 0)
+        },
+        performance_quotidienne: dailyPerformance.rows,
+        metriques_qualite: controleurStats.rows
+      };
+      
+      res.setHeader('Content-Type', 'application/json; charset=utf-8');
+      res.setHeader('Content-Disposition', `attachment; filename="${filename}.json"`);
+      res.json(report);
+    }
+
+  } catch (error) {
+    console.error('Error generating report:', error);
+    res.status(500).json({ 
+      error: 'Failed to generate report',
+      details: error.message 
+    });
   }
 });
 
