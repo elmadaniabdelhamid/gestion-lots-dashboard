@@ -3,9 +3,11 @@ const cors = require('cors');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
+const os = require('os');
 const StreamZip = require('node-stream-zip');
 const { Pool } = require('pg');
 const ExcelJS = require('exceljs');
+const { Worker } = require('worker_threads');
 require('dotenv').config();
 
 const app = express();
@@ -444,77 +446,103 @@ async function bulkInsertData(data) {
   }
 }
 
-// Process single file from ZIP (simplified, more reliable)
-async function processZipFile(zip, entry, sourceFile = null) {
-  try {
-    const content = await zip.entryData(entry.name);
-    const jsonData = JSON.parse(content.toString('utf8'));
-    
-    // Handle single object or array of objects
-    const dataArray = Array.isArray(jsonData) ? jsonData : [jsonData];
-    const results = [];
-    
-    for (const item of dataArray) {
-      // Extract arborescence from file path
-      const pathParts = entry.name.split('/');
-      pathParts.pop(); // Remove filename
-      const arborescence = pathParts.join('/');
-      
-      // Parse quality data if present
-      let doublons = 0;
-      let baseline = 0;
-      if (item.qualite_acte) {
-        const qualityData = parseQualiteActe(item.qualite_acte);
-        doublons = qualityData.doublons;
-        baseline = qualityData.baseline;
+// Process files using Worker Thread Pool
+async function processWithWorkerPool(zip, jsonFiles, sourceFile, poolSize = 4) {
+  const allData = [];
+  const errors = [];
+  
+  console.log(`[ZIP IMPORT] Using Worker Thread Pool with ${poolSize} workers`);
+  
+  // Create worker pool queue
+  const queue = [...jsonFiles];
+  let activeWorkers = 0;
+  let processedCount = 0;
+  
+  return new Promise((resolve) => {
+    const processNext = async () => {
+      // Check if we're done
+      if (queue.length === 0 && activeWorkers === 0) {
+        resolve({ allData, errors });
+        return;
       }
       
-      // Extract Num_lot - use filename as fallback if missing
-      let numLot = item.Num_lot || item.num_lot || item.numero_lot;
-      
-      // If still null/undefined, try to extract from filename
-      if (!numLot || numLot === 'null' || numLot === 'undefined') {
-        const filename = path.basename(entry.name, '.json');
-        // Try to parse filename as number
-        numLot = parseInt(filename) || null;
-        if (numLot) {
-          console.log(`[ZIP IMPORT] Using filename as Num_lot for ${entry.name}: ${numLot}`);
+      // Process next file if queue has items and we have capacity
+      while (queue.length > 0 && activeWorkers < poolSize) {
+        const entry = queue.shift();
+        activeWorkers++;
+        
+        // Extract file content
+        try {
+          const content = await zip.entryData(entry.name);
+          const jsonContent = content.toString('utf8');
+          
+          // Create and run worker
+          const worker = new Worker(path.join(__dirname, 'zipWorker.js'), {
+            workerData: {
+              jsonContent,
+              entryName: entry.name,
+              sourceFile
+            }
+          });
+          
+          worker.on('message', (result) => {
+            activeWorkers--;
+            processedCount++;
+            
+            if (result.success) {
+              if (result.data && result.data.length > 0) {
+                allData.push(...result.data);
+              }
+            } else {
+              console.error(`[ZIP IMPORT] ❌ Worker error for ${result.entryName}:`, result.error);
+              errors.push({
+                file: result.entryName,
+                error: result.error
+              });
+            }
+            
+            // Log progress every 50 files
+            if (processedCount % 50 === 0 || processedCount === jsonFiles.length) {
+              console.log(`[ZIP IMPORT] Processed ${processedCount}/${jsonFiles.length} files (${Math.round(processedCount / jsonFiles.length * 100)}%)`);
+            }
+            
+            // Continue processing
+            processNext();
+          });
+          
+          worker.on('error', (error) => {
+            activeWorkers--;
+            processedCount++;
+            console.error(`[ZIP IMPORT] ❌ Worker thread error for ${entry.name}:`, error.message);
+            errors.push({
+              file: entry.name,
+              error: error.message
+            });
+            processNext();
+          });
+          
+          worker.on('exit', (code) => {
+            if (code !== 0) {
+              console.error(`[ZIP IMPORT] ❌ Worker stopped with exit code ${code} for ${entry.name}`);
+            }
+          });
+          
+        } catch (error) {
+          activeWorkers--;
+          processedCount++;
+          console.error(`[ZIP IMPORT] ❌ Error extracting ${entry.name}:`, error.message);
+          errors.push({
+            file: entry.name,
+            error: error.message
+          });
+          processNext();
         }
       }
-      
-      // Parse as integer
-      const numLotInt = parseInt(numLot);
-      
-      // Final validation - must be a valid integer (allow 0)
-      if (isNaN(numLotInt) || numLotInt === null || numLotInt === undefined) {
-        console.warn(`[ZIP IMPORT] ❌ Skipping entry in ${entry.name}: invalid Num_lot (not a number): ${numLot}`);
-        continue;
-      }
-      
-      results.push({
-        Num_lot: numLotInt,
-        arborescence: item.arborescence || arborescence || null,
-        login_controleur: item.login_controleur || item.controleur || 'agent de controle',
-        login_scan: item.login_scan || item.agent_scan || 'agent de scan',
-        date_debut: item.date_debut ? new Date(item.date_debut) : null,
-        date_fin: item.date_fin ? new Date(item.date_fin) : null,
-        nb_actes_traites: parseInt(item.nb_actes_traites) || 0,
-        nb_actes_rejets: parseInt(item.nb_actes_rejets) || 0,
-        tentative: parseInt(item.tentative) || 0,
-        doublons: item.doublons || doublons || 0,
-        baseline: item.baseline || baseline || 0,
-        source_file: sourceFile
-      });
-    }
+    };
     
-    return results;
-  } catch (error) {
-    console.error(`[ZIP IMPORT] ❌ Error processing ${entry.name}:`, {
-      error: error.message,
-      stack: error.stack?.split('\n')[0]
-    });
-    return null;
-  }
+    // Start processing
+    processNext();
+  });
 }
 
 // Import ZIP file with optimized processing (simplified for reliability)
@@ -577,42 +605,10 @@ async function handleZipImport(req, res) {
 
     console.log(`[ZIP IMPORT] Found ${jsonFiles.length} JSON files to process`);
 
-    const allData = [];
-    const errors = [];
+    // Process files with Worker Thread Pool (optimal poolSize = CPU cores)
+    const workerPoolSize = Math.min(os.cpus().length, 8); // Max 8 workers
     
-    // Process in parallel batches (10 files at a time)
-    const BATCH_SIZE = 10;
-    
-    for (let i = 0; i < jsonFiles.length; i += BATCH_SIZE) {
-      const batch = jsonFiles.slice(i, i + BATCH_SIZE);
-      
-      // Process batch in parallel
-      const batchPromises = batch.map(entry => 
-        processZipFile(zip, entry, sourceFile).catch(err => {
-          console.error(`[ZIP IMPORT] ❌ Error processing ${entry.name}:`, err.message);
-          return null;
-        })
-      );
-      const results = await Promise.all(batchPromises);
-      
-      // Collect results
-      results.forEach((result, index) => {
-        if (result && result.length > 0) {
-          allData.push(...result);
-        } else if (result === null) {
-          errors.push({
-            file: batch[index].name,
-            error: 'Failed to process file'
-          });
-        }
-      });
-      
-      // Log progress every 50 files
-      if ((i + BATCH_SIZE) % 50 === 0 || i + BATCH_SIZE >= jsonFiles.length) {
-        const processed = Math.min(i + BATCH_SIZE, jsonFiles.length);
-        console.log(`[ZIP IMPORT] Processed ${processed}/${jsonFiles.length} files (${Math.round(processed / jsonFiles.length * 100)}%)`);
-      }
-    }
+    const { allData, errors } = await processWithWorkerPool(zip, jsonFiles, sourceFile, workerPoolSize);
 
     await zip.close();
     
@@ -863,6 +859,7 @@ app.get('/api/export/report', async (req, res) => {
         SELECT 
           COALESCE(login_controleur, 'Non spécifié') as controleur,
           DATE(date_debut) as date_lot,
+          COUNT(DISTINCT "Num_lot") as total_lots,
           SUM(nb_actes_traites) as total_actes
         FROM controle 
         WHERE date_debut IS NOT NULL
@@ -875,80 +872,149 @@ app.get('/api/export/report', async (req, res) => {
     const timestamp = new Date().toLocaleString('fr-FR');
     const filename = `rapport-gestion-lots-${Date.now()}`;
 
+    // Build daily performance matrix with BOTH lots and actes (shared by CSV and Excel)
+    const dateMap = new Map();
+    const controllerMap = new Map();
+    
+    dailyPerformance.rows.forEach(row => {
+      const dateStr = new Date(row.date_lot).toLocaleDateString('fr-FR');
+      const controller = row.controleur;
+      const lots = parseInt(row.total_lots) || 0;
+      const actes = parseInt(row.total_actes) || 0;
+      
+      if (!dateMap.has(dateStr)) {
+        dateMap.set(dateStr, new Date(row.date_lot));
+      }
+      
+      if (!controllerMap.has(controller)) {
+        controllerMap.set(controller, new Map());
+      }
+      
+      controllerMap.get(controller).set(dateStr, { lots, actes });
+    });
+    
+    const sortedDates = Array.from(dateMap.entries())
+      .sort((a, b) => a[1] - b[1])
+      .map(entry => entry[0]);
+    
+    const sortedControllers = Array.from(controllerMap.keys()).sort();
+
     if (format === 'csv') {
-      // Generate CSV (legacy)
+      // Generate CSV with new format (Lots and Actes columns)
       const lines = [];
-      lines.push('Chef d\'équipe,' + sortedDates.join(','));
-      const dailyTotals = new Map();
-      sortedDates.forEach(date => dailyTotals.set(date, 0));
+      
+      // Header row with dates
+      const headerRow = ['Chef d\'équipe'];
+      sortedDates.forEach(date => {
+        headerRow.push(`${date} - Lots`);
+        headerRow.push(`${date} - Actes`);
+      });
+      lines.push(headerRow.join(','));
+      
+      // Data rows
+      const dailyLotsTotal = new Map();
+      const dailyActesTotal = new Map();
+      sortedDates.forEach(date => {
+        dailyLotsTotal.set(date, 0);
+        dailyActesTotal.set(date, 0);
+      });
+      
       sortedControllers.forEach(controller => {
         const row = [controller];
         sortedDates.forEach(date => {
-          const value = controllerMap.get(controller).get(date) || 0;
-          row.push(value);
-          dailyTotals.set(date, dailyTotals.get(date) + value);
+          const data = controllerMap.get(controller).get(date) || { lots: 0, actes: 0 };
+          row.push(data.lots || '');
+          row.push(data.actes || '');
+          dailyLotsTotal.set(date, dailyLotsTotal.get(date) + data.lots);
+          dailyActesTotal.set(date, dailyActesTotal.get(date) + data.actes);
         });
         lines.push(row.join(','));
       });
+      
+      // Total général row
       const totalRow = ['Total général'];
-      sortedDates.forEach(date => totalRow.push(dailyTotals.get(date)));
+      sortedDates.forEach(date => {
+        totalRow.push(dailyLotsTotal.get(date));
+        totalRow.push(dailyActesTotal.get(date));
+      });
       lines.push(totalRow.join(','));
       lines.push('');
       lines.push('');
-      lines.push('Chef d\'équipe,Nbr d\'image contrôlé,Nbr d\'erreur détecté,Taux d\'erreur,Objectif');
+      
+      // Error statistics table
+      lines.push('Chef d\'équipe,Nbr d\'image Controlee,Nbr d\'erreur détecté,Taux d\'erreur');
       controleurStats.rows.forEach(c => {
-        lines.push(`${c.controleur},${c.total_actes_controlees},${c.total_erreurs},${c.taux_erreur}%,1%`);
+        lines.push(`${c.controleur},${c.total_actes_controlees},${c.total_erreurs},${c.taux_erreur}%`);
       });
       lines.push('');
-      lines.push('--- FIN DU RAPPORT ---');
+      
       res.setHeader('Content-Type', 'text/csv; charset=utf-8');
       res.setHeader('Content-Disposition', `attachment; filename="${filename}.csv"`);
       res.send('\uFEFF' + lines.join('\n'));
     } else if (format === 'excel' || format === 'xlsx') {
-      // Generate styled Excel file
+      // Generate styled Excel file matching the new format
       const workbook = new ExcelJS.Workbook();
       const worksheet = workbook.addWorksheet('Rapport Performance');
 
-      // Build daily performance matrix
-      const dateMap = new Map();
-      const controllerMap = new Map();
+      // TABLE 1: Daily Performance Matrix
+      // Row 1: Date headers (merged cells)
+      const dateHeaderRow = worksheet.getRow(1);
+      dateHeaderRow.getCell(1).value = 'Chef d\'equipe';
       
-      dailyPerformance.rows.forEach(row => {
-        const dateStr = new Date(row.date_lot).toLocaleDateString('fr-FR');
-        const controller = row.controleur;
-        const actes = parseInt(row.total_actes) || 0;
-        
-        if (!dateMap.has(dateStr)) {
-          dateMap.set(dateStr, new Date(row.date_lot));
-        }
-        
-        if (!controllerMap.has(controller)) {
-          controllerMap.set(controller, new Map());
-        }
-        
-        controllerMap.get(controller).set(dateStr, actes);
+      sortedDates.forEach((date, idx) => {
+        const startCol = 2 + (idx * 2); // Each date takes 2 columns
+        dateHeaderRow.getCell(startCol).value = date;
+        // Merge cells for date header
+        worksheet.mergeCells(1, startCol, 1, startCol + 1);
       });
       
-      const sortedDates = Array.from(dateMap.entries())
-        .sort((a, b) => a[1] - b[1])
-        .map(entry => entry[0]);
+      // Add Total column header (merged)
+      const totalColStart = 2 + (sortedDates.length * 2);
+      dateHeaderRow.getCell(totalColStart).value = 'Total';
+      worksheet.mergeCells(1, totalColStart, 1, totalColStart + 1);
       
-      const sortedControllers = Array.from(controllerMap.keys()).sort();
-
-      // TABLE 1: Daily Performance
-      const headerRow1 = ['Agent de controle$', ...sortedDates];
-      const table1StartRow = 1;
-      const table1HeaderRow = worksheet.addRow(headerRow1);
-      
-      // Style header row 1
-      table1HeaderRow.font = { bold: true, color: { argb: 'FFFFFFFF' } };
-      table1HeaderRow.fill = {
+      // Style date header row
+      dateHeaderRow.font = { bold: true, color: { argb: 'FFFFFFFF' } };
+      dateHeaderRow.fill = {
         type: 'pattern',
         pattern: 'solid',
-        fgColor: { argb: 'FF000000' }
+        fgColor: { argb: 'FF4472C4' } // Blue color matching screenshot
       };
-      table1HeaderRow.alignment = { vertical: 'middle', horizontal: 'center' };
-      table1HeaderRow.eachCell(cell => {
+      dateHeaderRow.alignment = { vertical: 'middle', horizontal: 'center' };
+      dateHeaderRow.height = 20;
+      dateHeaderRow.eachCell(cell => {
+        cell.border = {
+          top: { style: 'thin' },
+          left: { style: 'thin' },
+          bottom: { style: 'thin' },
+          right: { style: 'thin' }
+        };
+      });
+
+      // Row 2: Sub-headers (Lots / Actes)
+      const subHeaderRow = worksheet.getRow(2);
+      subHeaderRow.getCell(1).value = ''; // Empty cell under "Chef d'equipe"
+      
+      sortedDates.forEach((date, idx) => {
+        const startCol = 2 + (idx * 2);
+        subHeaderRow.getCell(startCol).value = 'Lots';
+        subHeaderRow.getCell(startCol + 1).value = 'Actes';
+      });
+      
+      // Add Total sub-headers (reuse totalColStart from above)
+      subHeaderRow.getCell(totalColStart).value = 'Actes';
+      subHeaderRow.getCell(totalColStart + 1).value = 'Lots';
+      
+      // Style sub-header row
+      subHeaderRow.font = { bold: true, color: { argb: 'FFFFFFFF' } };
+      subHeaderRow.fill = {
+        type: 'pattern',
+        pattern: 'solid',
+        fgColor: { argb: 'FF4472C4' }
+      };
+      subHeaderRow.alignment = { vertical: 'middle', horizontal: 'center' };
+      subHeaderRow.height = 20;
+      subHeaderRow.eachCell(cell => {
         cell.border = {
           top: { style: 'thin' },
           left: { style: 'thin' },
@@ -958,17 +1024,40 @@ app.get('/api/export/report', async (req, res) => {
       });
 
       // Add controller data rows
-      const dailyTotals = new Map();
-      sortedDates.forEach(date => dailyTotals.set(date, 0));
+      const dailyLotsTotal = new Map();
+      const dailyActesTotal = new Map();
+      sortedDates.forEach(date => {
+        dailyLotsTotal.set(date, 0);
+        dailyActesTotal.set(date, 0);
+      });
       
+      let currentRow = 3;
       sortedControllers.forEach(controller => {
-        const rowData = [controller];
-        sortedDates.forEach(date => {
-          const value = controllerMap.get(controller).get(date) || 0;
-          rowData.push(value);
-          dailyTotals.set(date, dailyTotals.get(date) + value);
+        const dataRow = worksheet.getRow(currentRow);
+        dataRow.getCell(1).value = controller;
+        
+        let controllerTotalLots = 0;
+        let controllerTotalActes = 0;
+        
+        sortedDates.forEach((date, idx) => {
+          const startCol = 2 + (idx * 2);
+          const data = controllerMap.get(controller).get(date) || { lots: 0, actes: 0 };
+          
+          dataRow.getCell(startCol).value = data.lots || '';
+          dataRow.getCell(startCol + 1).value = data.actes || '';
+          
+          controllerTotalLots += data.lots;
+          controllerTotalActes += data.actes;
+          
+          dailyLotsTotal.set(date, dailyLotsTotal.get(date) + data.lots);
+          dailyActesTotal.set(date, dailyActesTotal.get(date) + data.actes);
         });
-        const dataRow = worksheet.addRow(rowData);
+        
+        // Add Total column for this controller (reuse totalColStart)
+        dataRow.getCell(totalColStart).value = controllerTotalActes;
+        dataRow.getCell(totalColStart + 1).value = controllerTotalLots;
+        
+        // Style data row
         dataRow.eachCell((cell, colNumber) => {
           if (colNumber === 1) {
             cell.alignment = { vertical: 'middle', horizontal: 'left' };
@@ -982,12 +1071,31 @@ app.get('/api/export/report', async (req, res) => {
             right: { style: 'thin' }
           };
         });
+        
+        currentRow++;
       });
 
       // Add Total général row
-      const totalRowData = ['Total général'];
-      sortedDates.forEach(date => totalRowData.push(dailyTotals.get(date)));
-      const totalRow = worksheet.addRow(totalRowData);
+      const totalRow = worksheet.getRow(currentRow);
+      totalRow.getCell(1).value = 'Total general';
+      
+      let grandTotalLots = 0;
+      let grandTotalActes = 0;
+      
+      sortedDates.forEach((date, idx) => {
+        const startCol = 2 + (idx * 2);
+        const lots = dailyLotsTotal.get(date);
+        const actes = dailyActesTotal.get(date);
+        totalRow.getCell(startCol).value = lots;
+        totalRow.getCell(startCol + 1).value = actes;
+        grandTotalLots += lots;
+        grandTotalActes += actes;
+      });
+      
+      // Add grand total in the Total column (reuse totalColStart)
+      totalRow.getCell(totalColStart).value = grandTotalActes;
+      totalRow.getCell(totalColStart + 1).value = grandTotalLots;
+      
       totalRow.font = { bold: true };
       totalRow.eachCell((cell, colNumber) => {
         if (colNumber === 1) {
@@ -1003,29 +1111,30 @@ app.get('/api/export/report', async (req, res) => {
         };
       });
 
+      currentRow++;
+      
       // Add spacing
-      worksheet.addRow([]);
-      worksheet.addRow([]);
+      currentRow++;
+      currentRow++;
 
       // TABLE 2: Quality Metrics
-      const table2HeaderRow = worksheet.addRow([
-        'Agent de controle$',
-        'Nbr d\'image contrôlé',
-        'Nbr d\'erreur détecté',
-        'Taux d\'erreur',
-        'Objectif'
-      ]);
+      const table2HeaderRow = worksheet.getRow(currentRow);
+      table2HeaderRow.getCell(1).value = 'Chef d\'equipe';
+      table2HeaderRow.getCell(2).value = 'Nbr d\'image Controlee';
+      table2HeaderRow.getCell(3).value = 'Nbr d erreur detecte';
+      table2HeaderRow.getCell(4).value = 'Taux d\'erreur';
       
       // Style header row 2
       table2HeaderRow.font = { bold: true, color: { argb: 'FFFFFFFF' } };
       table2HeaderRow.fill = {
         type: 'pattern',
         pattern: 'solid',
-        fgColor: { argb: 'FF000000' }
+        fgColor: { argb: 'FF4472C4' }
       };
       table2HeaderRow.alignment = { vertical: 'middle', horizontal: 'center' };
-      table2HeaderRow.eachCell(cell => {
-        cell.border = {
+      table2HeaderRow.height = 20;
+      [1, 2, 3, 4].forEach(col => {
+        table2HeaderRow.getCell(col).border = {
           top: { style: 'thin' },
           left: { style: 'thin' },
           bottom: { style: 'thin' },
@@ -1033,18 +1142,19 @@ app.get('/api/export/report', async (req, res) => {
         };
       });
 
+      currentRow++;
+
       // Add quality data rows
       controleurStats.rows.forEach(c => {
-        const qualityRow = worksheet.addRow([
-          c.controleur,
-          c.total_actes_controlees,
-          c.total_erreurs,
-          `${c.taux_erreur}%`,
-          '1%'
-        ]);
+        const qualityRow = worksheet.getRow(currentRow);
+        qualityRow.getCell(1).value = c.controleur;
+        qualityRow.getCell(2).value = c.total_actes_controlees;
+        qualityRow.getCell(3).value = c.total_erreurs;
+        qualityRow.getCell(4).value = `${c.taux_erreur}%`;
         
-        qualityRow.eachCell((cell, colNumber) => {
-          if (colNumber === 1) {
+        [1, 2, 3, 4].forEach(col => {
+          const cell = qualityRow.getCell(col);
+          if (col === 1) {
             cell.alignment = { vertical: 'middle', horizontal: 'left' };
           } else {
             cell.alignment = { vertical: 'middle', horizontal: 'center' };
@@ -1055,44 +1165,22 @@ app.get('/api/export/report', async (req, res) => {
             bottom: { style: 'thin' },
             right: { style: 'thin' }
           };
-          
-          // Highlight error rate if above objective
-          if (colNumber === 4 && parseFloat(c.taux_erreur) > 1.0) {
-            cell.fill = {
-              type: 'pattern',
-              pattern: 'solid',
-              fgColor: { argb: 'FFFF6B6B' }
-            };
-            cell.font = { bold: true };
-          } else if (colNumber === 4) {
-            cell.fill = {
-              type: 'pattern',
-              pattern: 'solid',
-              fgColor: { argb: 'FF90EE90' }
-            };
-          }
         });
+        
+        currentRow++;
       });
 
-      // Add footer
-      worksheet.addRow([]);
-      const footerRow = worksheet.addRow(['--- FIN DU RAPPORT ---']);
-      footerRow.font = { italic: true };
-
-      // Auto-fit columns
-      worksheet.columns.forEach((column, idx) => {
-        if (idx === 0) {
-          column.width = 25;
-        } else {
-          column.width = 15;
-        }
-      });
-
-      // Enable autofilter on both table headers
-      worksheet.autoFilter = {
-        from: { row: 1, column: 1 },
-        to: { row: 1, column: headerRow1.length }
-      };
+      // Set column widths
+      worksheet.getColumn(1).width = 20; // Chef d'equipe column
+      // Set widths for date columns (Lots and Actes) + Total columns
+      const totalColumns = 1 + (sortedDates.length * 2) + 2; // +2 for Total (Actes and Lots)
+      for (let i = 2; i <= totalColumns; i++) {
+        worksheet.getColumn(i).width = 12;
+      }
+      // Set widths for error table
+      worksheet.getColumn(2).width = 22; // Nbr d'image Controlee
+      worksheet.getColumn(3).width = 22; // Nbr d erreur detecte
+      worksheet.getColumn(4).width = 15; // Taux d'erreur
 
       // Send Excel file
       res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
