@@ -200,6 +200,9 @@ app.post('/api/import', upload.single('jsonFile'), async (req, res) => {
 
     for (const item of data) {
       try {
+        // Parse qualite_acte to extract doublons and baseline
+        const { doublons, baseline } = parseQualiteActe(item.qualite_acte);
+        
         const query = `
           INSERT INTO controle (
             "Num_lot", arborescence, login_controleur, login_scan, 
@@ -230,8 +233,8 @@ app.post('/api/import', upload.single('jsonFile'), async (req, res) => {
           item.nb_actes_traites || 0,
           item.nb_actes_rejets || 0,
           item.tentative || 0,
-          item.doublons || 0,
-          item.baseline || 0
+          doublons,
+          baseline
         ]);
 
         successCount++;
@@ -294,6 +297,9 @@ app.post('/api/import/json', async (req, res) => {
 
     for (const item of data) {
       try {
+        // Parse qualite_acte to extract doublons and baseline
+        const { doublons, baseline } = parseQualiteActe(item.qualite_acte);
+        
         const query = `
           INSERT INTO controle (
             "Num_lot", arborescence, login_controleur, login_scan, 
@@ -324,8 +330,8 @@ app.post('/api/import/json', async (req, res) => {
           item.nb_actes_traites || 0,
           item.nb_actes_rejets || 0,
           item.tentative || 0,
-          item.doublons || 0,
-          item.baseline || 0
+          doublons,
+          baseline
         ]);
 
         successCount++;

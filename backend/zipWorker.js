@@ -7,6 +7,7 @@ function parseQualiteActe(qualiteActe) {
     try {
       qualiteActe = JSON.parse(qualiteActe);
     } catch (e) {
+      console.log('[WORKER DEBUG] Failed to parse qualite_acte string:', e.message);
       return { doublons: 0, baseline: 0 };
     }
   }
@@ -15,14 +16,28 @@ function parseQualiteActe(qualiteActe) {
   let baseline = 0;
 
   if (qualiteActe && typeof qualiteActe === 'object') {
-    if (qualiteActe.doublons !== undefined) {
-      doublons = parseInt(qualiteActe.doublons) || 0;
+    // Extract doublon count from array of objects
+    if (qualiteActe.doublon && Array.isArray(qualiteActe.doublon)) {
+      console.log('[WORKER DEBUG] Found doublon array with', qualiteActe.doublon.length, 'items');
+      doublons = qualiteActe.doublon.reduce((total, item) => {
+        const count = item.images ? item.images.length : 0;
+        console.log('[WORKER DEBUG] Doublon item has', count, 'images');
+        return total + count;
+      }, 0);
     }
-    if (qualiteActe.baseline !== undefined) {
-      baseline = parseInt(qualiteActe.baseline) || 0;
+    
+    // Extract baseline count from array of objects
+    if (qualiteActe.baseline && Array.isArray(qualiteActe.baseline)) {
+      console.log('[WORKER DEBUG] Found baseline array with', qualiteActe.baseline.length, 'items');
+      baseline = qualiteActe.baseline.reduce((total, item) => {
+        const count = item.images ? item.images.length : 0;
+        console.log('[WORKER DEBUG] Baseline item has', count, 'images');
+        return total + count;
+      }, 0);
     }
   }
 
+  console.log('[WORKER DEBUG] parseQualiteActe returning:', { doublons, baseline });
   return { doublons, baseline };
 }
 
@@ -45,9 +60,13 @@ function processFileData(jsonContent, entryName, sourceFile) {
       let doublons = 0;
       let baseline = 0;
       if (item.qualite_acte) {
+        console.log(`[WORKER DEBUG] Processing qualite_acte for ${item.Num_lot}:`, JSON.stringify(item.qualite_acte).substring(0, 200));
         const qualityData = parseQualiteActe(item.qualite_acte);
+        console.log(`[WORKER DEBUG] Extracted doublons=${qualityData.doublons}, baseline=${qualityData.baseline}`);
         doublons = qualityData.doublons;
         baseline = qualityData.baseline;
+      } else {
+        console.log(`[WORKER DEBUG] No qualite_acte found for ${item.Num_lot}`);
       }
       
       // Extract Num_lot - use filename as fallback if missing
@@ -79,8 +98,8 @@ function processFileData(jsonContent, entryName, sourceFile) {
         nb_actes_traites: parseInt(item.nb_actes_traites) || 0,
         nb_actes_rejets: parseInt(item.nb_actes_rejets) || 0,
         tentative: parseInt(item.tentative) || 0,
-        doublons: item.doublons || doublons || 0,
-        baseline: item.baseline || baseline || 0,
+        doublons: doublons,
+        baseline: baseline,
         source_file: sourceFile
       });
     }
