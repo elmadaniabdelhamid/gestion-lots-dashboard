@@ -19,65 +19,10 @@ function App() {
     console.log('Initializing ApexCharts...');
     
     try {
-      // Line Chart - Progression des Lots
-      const lineChart = {
-        chart: {
-          height: 300,
-          type: 'line',
-          zoom: {
-            enabled: false
-          },
-          toolbar: {
-            show: false
-          }
-        },
-        dataLabels: {
-          enabled: false
-        },
-        stroke: {
-          curve: 'smooth',
-          width: 3
-        },
-        series: [{
-          name: "Lots",
-          data: jsonData.map((item, index) => ({
-            x: `Lot ${index + 1}`,
-            y: item.nb_actes_traites || 0
-          })).slice(0, 10)
-        }],
-        title: {
-          text: 'Progression des Lots',
-          align: 'left',
-          style: {
-            fontSize: '16px',
-            fontWeight: 600,
-            color: '#333'
-          }
-        },
-        grid: {
-          row: {
-            colors: ['#f3f3f3', 'transparent'],
-            opacity: 0.5
-          },
-        },
-        xaxis: {
-          categories: jsonData.slice(0, 10).map((item, index) => `Lot ${index + 1}`),
-        },
-        colors: ['#667eea'],
-        tooltip: {
-          y: {
-            formatter: function (val) {
-              return val + " actes"
-            }
-          }
-        }
-      };
-      new ApexCharts(document.querySelector("#line-chart"), lineChart).render();
-
       // Bar Chart - Actes traités par contrôleur
       const controllerChart = {
         chart: {
-          height: 300,
+          height: 400,
           type: 'bar',
           toolbar: {
             show: false
@@ -86,12 +31,23 @@ function App() {
         plotOptions: {
           bar: {
             horizontal: false,
-            columnWidth: '60%',
-            borderRadius: 8
+            columnWidth: '50%',
+            borderRadius: 8,
+            dataLabels: {
+              position: 'top',
+            }
           }
         },
         dataLabels: {
-          enabled: false
+          enabled: true,
+          offsetY: -20,
+          style: {
+            fontSize: '12px',
+            colors: ["#333"]
+          },
+          formatter: function (val) {
+            return val.toLocaleString();
+          }
         },
         series: [{
           name: 'Actes Traités',
@@ -111,15 +67,6 @@ function App() {
             y: total
           })).sort((a, b) => b.y - a.y).slice(0, 10)
         }],
-        title: {
-          text: 'Actes Traités par Contrôleur',
-          align: 'left',
-          style: {
-            fontSize: '16px',
-            fontWeight: 600,
-            color: '#333'
-          }
-        },
         xaxis: {
           categories: Object.entries(
             jsonData.reduce((acc, item) => {
@@ -163,6 +110,17 @@ function App() {
               return val + " actes"
             }
           }
+        },
+        grid: {
+          show: true,
+          borderColor: '#e0e0e0',
+          strokeDashArray: 0,
+          position: 'back',
+          xaxis: {
+            lines: {
+              show: false
+            }
+          }
         }
       };
       new ApexCharts(document.querySelector("#donut-chart"), controllerChart).render();
@@ -202,6 +160,47 @@ function App() {
     setCurrentPage(1); // Reset to first page when filter changes
   };
 
+  const handleDeleteLot = async (numLot) => {
+    if (!window.confirm(`Êtes-vous sûr de vouloir supprimer le lot ${numLot} ?`)) {
+      return;
+    }
+
+    try {
+      const response = await fetch(`http://localhost:5000/api/controle/${numLot}`, {
+        method: 'DELETE'
+      });
+      
+      if (response.ok) {
+        const result = await response.json();
+        setUploadStatus(result.message);
+        
+        // Refresh data by fetching updated list
+        const dataResponse = await fetch('http://localhost:5000/api/controle');
+        if (dataResponse.ok) {
+          const data = await dataResponse.json();
+          setJsonData(data);
+          
+          // Reset to first page if current page is now empty
+          const filteredData = getFilteredData().filter(item => item.Num_lot !== numLot);
+          const totalPages = Math.ceil(filteredData.length / itemsPerPage);
+          if (currentPage > totalPages && totalPages > 0) {
+            setCurrentPage(totalPages);
+          }
+        }
+        
+        setTimeout(() => setUploadStatus(''), 3000);
+      } else {
+        const errorData = await response.json();
+        setUploadStatus(`Erreur: ${errorData.error}`);
+        setTimeout(() => setUploadStatus(''), 3000);
+      }
+    } catch (error) {
+      console.error('Error deleting lot:', error);
+      setUploadStatus('Erreur de connexion au serveur');
+      setTimeout(() => setUploadStatus(''), 3000);
+    }
+  };
+
   const handleExport = async (format = 'xlsx') => {
     try {
       setIsLoading(true);
@@ -214,7 +213,7 @@ function App() {
         const a = document.createElement('a');
         a.href = url;
         const extension = format === 'xlsx' || format === 'excel' ? 'xlsx' : (format === 'csv' ? 'csv' : 'json');
-        a.download = `rapport-gestion-lots-${Date.now()}.${extension}`;
+        a.download = `rapport_gestion_lots.${extension}`;
         document.body.appendChild(a);
         a.click();
         window.URL.revokeObjectURL(url);
@@ -278,6 +277,65 @@ function App() {
       setTimeout(() => {
         initCharts();
       }, 500);
+    }
+  }, [showDashboard, jsonData]);
+
+  // Make table columns resizable
+  useEffect(() => {
+    if (showDashboard) {
+      const makeColumnsResizable = () => {
+        const tables = document.querySelectorAll('.data-table');
+        
+        tables.forEach(table => {
+          const headers = table.querySelectorAll('th');
+          
+          headers.forEach((header, index) => {
+            // Skip last column to avoid resize issues
+            if (index < headers.length - 1) {
+              header.classList.add('resizable');
+              
+              const handleMouseDown = (e) => {
+                if (e.offsetX > header.offsetWidth - 10) {
+                  e.preventDefault();
+                  
+                  const startX = e.pageX;
+                  const startWidth = header.offsetWidth;
+                  
+                  const handleMouseMove = (e) => {
+                    const newWidth = startWidth + (e.pageX - startX);
+                    if (newWidth > 50) { // Minimum width
+                      header.style.width = newWidth + 'px';
+                      header.style.minWidth = newWidth + 'px';
+                      header.style.maxWidth = newWidth + 'px';
+                      
+                      // Apply same width to all cells in this column
+                      const cells = table.querySelectorAll(`td:nth-child(${index + 1})`);
+                      cells.forEach(cell => {
+                        cell.style.width = newWidth + 'px';
+                        cell.style.minWidth = newWidth + 'px';
+                        cell.style.maxWidth = newWidth + 'px';
+                      });
+                    }
+                  };
+                  
+                  const handleMouseUp = () => {
+                    document.removeEventListener('mousemove', handleMouseMove);
+                    document.removeEventListener('mouseup', handleMouseUp);
+                  };
+                  
+                  document.addEventListener('mousemove', handleMouseMove);
+                  document.addEventListener('mouseup', handleMouseUp);
+                }
+              };
+              
+              header.addEventListener('mousedown', handleMouseDown);
+            }
+          });
+        });
+      };
+      
+      // Delay to ensure table is rendered
+      setTimeout(makeColumnsResizable, 1000);
     }
   }, [showDashboard, jsonData]);
 
@@ -477,21 +535,7 @@ function App() {
 
               {/* Graphiques */}
               <div className="charts-grid">
-                <div className="chart-card">
-                  <div className="chart-header">
-                    <h3>Progression des Lots</h3>
-                    <div className="chart-actions">
-                      <button className="chart-action-btn">
-                        <i className="fa fa-ellipsis-h"></i>
-                      </button>
-                    </div>
-                  </div>
-                  <div className="chart-container">
-                    <div id="line-chart"></div>
-                  </div>
-                </div>
-                
-                <div className="chart-card">
+                <div className="chart-card full-width">
                   <div className="chart-header">
                     <h3>Actes Traités par Contrôleur</h3>
                     <div className="chart-actions">

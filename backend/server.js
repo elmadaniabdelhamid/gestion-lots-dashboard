@@ -876,7 +876,6 @@ app.get('/api/export/report', async (req, res) => {
 
     const gs = generalStats.rows[0];
     const timestamp = new Date().toLocaleString('fr-FR');
-    const filename = `rapport-gestion-lots-${Date.now()}`;
 
     // Build daily performance matrix with BOTH lots and actes (shared by CSV and Excel)
     const dateMap = new Map();
@@ -955,7 +954,7 @@ app.get('/api/export/report', async (req, res) => {
       lines.push('');
       
       res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-      res.setHeader('Content-Disposition', `attachment; filename="${filename}.csv"`);
+      res.setHeader('Content-Disposition', `attachment; filename="rapport_gestion_lots.csv"`);
       res.send('\uFEFF' + lines.join('\n'));
     } else if (format === 'excel' || format === 'xlsx') {
       // Generate styled Excel file matching the new format
@@ -1190,7 +1189,7 @@ app.get('/api/export/report', async (req, res) => {
 
       // Send Excel file
       res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-      res.setHeader('Content-Disposition', `attachment; filename="${filename}.xlsx"`);
+      res.setHeader('Content-Disposition', `attachment; filename="rapport_gestion_lots.xlsx"`);
       
       await workbook.xlsx.write(res);
       res.end();
@@ -1215,7 +1214,7 @@ app.get('/api/export/report', async (req, res) => {
       };
       
       res.setHeader('Content-Type', 'application/json; charset=utf-8');
-      res.setHeader('Content-Disposition', `attachment; filename="${filename}.json"`);
+      res.setHeader('Content-Disposition', `attachment; filename="rapport_gestion_lots.json"`);
       res.json(report);
     }
 

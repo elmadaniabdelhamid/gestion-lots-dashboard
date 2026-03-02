@@ -613,6 +613,10 @@ body {
   border: 1px solid rgba(255, 255, 255, 0.2);
 }
 
+.chart-card.full-width {
+  grid-column: 1 / -1;
+}
+
 .chart-header {
   display: flex;
   justify-content: space-between;
@@ -646,7 +650,7 @@ body {
 }
 
 .chart-container {
-  height: 300px;
+  height: 450px;
   position: relative;
 }
 
@@ -718,6 +722,7 @@ body {
   border-radius: 8px;
   overflow: hidden;
   font-size: 12px;
+  position: relative;
 }
 
 .data-table th {
@@ -728,6 +733,28 @@ body {
   font-weight: 600;
   font-size: 11px;
   white-space: nowrap;
+  position: relative;
+  user-select: none;
+}
+
+.data-table th.resizable {
+  cursor: col-resize;
+}
+
+.data-table th.resizable::after {
+  content: '';
+  position: absolute;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  width: 5px;
+  cursor: col-resize;
+  background: transparent;
+  z-index: 1;
+}
+
+.data-table th.resizable:hover::after {
+  background: rgba(255, 255, 255, 0.3);
 }
 
 .data-table td {
@@ -736,9 +763,9 @@ body {
   font-size: 11px;
   color: #333;
   white-space: nowrap;
-  max-width: 120px;
   overflow: hidden;
   text-overflow: ellipsis;
+  min-width: 80px;
 }
 
 .data-table tr:hover {
