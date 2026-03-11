@@ -105,7 +105,7 @@ def process_single_json(json_content: str, entry_name: str, source_file: str) ->
 
 
 def process_zip_file(zip_path: str, source_file: str, max_workers: int = 4) -> dict:
-    """Extract and process all JSON files from a ZIP archive using thread pool."""
+    """Extract and process JSON files from a ZIP archive by streaming reads into a thread pool."""
     all_data = []
     errors = []
 
@@ -116,42 +116,39 @@ def process_zip_file(zip_path: str, source_file: str, max_workers: int = 4) -> d
             if name.lower().endswith(".json") and not name.startswith("__MACOSX")
         ]
 
-        print(f"[ZIP IMPORT] Found {len(json_files)} JSON files to process")
+        total = len(json_files)
+        print(f"[ZIP IMPORT] Found {total} JSON files to process")
 
-        # Read all file contents first (I/O bound)
-        file_contents = {}
-        for name in json_files:
-            try:
-                file_contents[name] = zf.read(name).decode("utf-8")
-            except Exception as e:
-                errors.append({"file": name, "error": str(e)})
+        # Stream: read each file and submit for parsing immediately
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {}
+            for name in json_files:
+                try:
+                    content = zf.read(name).decode("utf-8")
+                    future = executor.submit(
+                        process_single_json, content, name, source_file
+                    )
+                    futures[future] = name
+                except Exception as e:
+                    errors.append({"file": name, "error": str(e)})
 
-    # Process in parallel (CPU bound parsing)
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {
-            executor.submit(
-                process_single_json, content, name, source_file
-            ): name
-            for name, content in file_contents.items()
-        }
+            processed = 0
+            for future in as_completed(futures):
+                processed += 1
+                result = future.result()
 
-        processed = 0
-        for future in as_completed(futures):
-            processed += 1
-            result = future.result()
+                if result["success"]:
+                    all_data.extend(result["data"])
+                else:
+                    errors.append(
+                        {"file": result["entry_name"], "error": result["error"]}
+                    )
 
-            if result["success"]:
-                all_data.extend(result["data"])
-            else:
-                errors.append(
-                    {"file": result["entry_name"], "error": result["error"]}
-                )
-
-            if processed % 50 == 0 or processed == len(json_files):
-                pct = round(processed / len(json_files) * 100)
-                print(
-                    f"[ZIP IMPORT] Processed {processed}/{len(json_files)} files ({pct}%)"
-                )
+                if processed % 50 == 0 or processed == total:
+                    pct = round(processed / total * 100)
+                    print(
+                        f"[ZIP IMPORT] Processed {processed}/{total} files ({pct}%)"
+                    )
 
     return {
         "all_data": all_data,
